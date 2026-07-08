@@ -1,6 +1,5 @@
 """
 Play commands: /play, /vplay, /playforce, /song, /video
-Uses pytgcalls old API (AudioPiped / VideoAudioPiped).
 """
 
 import os
@@ -9,6 +8,7 @@ from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 from KanhaMusic.config import Config
+from KanhaMusic.core.call import call_py
 from KanhaMusic.database import db
 from KanhaMusic.strings import get_string
 from KanhaMusic.utils import (
@@ -16,6 +16,7 @@ from KanhaMusic.utils import (
     get_stream_url, is_spotify_url, get_spotify_url_type,
     get_spotify_track, get_thumb,
     admin_or_auth, check_blacklist,
+    stream_audio, change_audio, stream_video,
 )
 
 os.makedirs("downloads", exist_ok=True)
@@ -24,19 +25,19 @@ os.makedirs("downloads", exist_ok=True)
 def _keyboard(chat_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("⏸ Pause", callback_data=f"pause_{chat_id}"),
-            InlineKeyboardButton("▶️ Resume", callback_data=f"resume_{chat_id}"),
-            InlineKeyboardButton("⏭ Skip", callback_data=f"skip_{chat_id}"),
+            InlineKeyboardButton("⏸ Pause",   callback_data=f"pause_{chat_id}"),
+            InlineKeyboardButton("▶️ Resume",  callback_data=f"resume_{chat_id}"),
+            InlineKeyboardButton("⏭ Skip",    callback_data=f"skip_{chat_id}"),
         ],
         [
-            InlineKeyboardButton("🔁 Loop", callback_data=f"loop_{chat_id}"),
+            InlineKeyboardButton("🔁 Loop",    callback_data=f"loop_{chat_id}"),
             InlineKeyboardButton("🔀 Shuffle", callback_data=f"shuffle_{chat_id}"),
-            InlineKeyboardButton("⏹ Stop", callback_data=f"stop_{chat_id}"),
+            InlineKeyboardButton("⏹ Stop",    callback_data=f"stop_{chat_id}"),
         ],
         [
-            InlineKeyboardButton("📋 Queue", callback_data=f"queue_{chat_id}"),
-            InlineKeyboardButton("🔊 Volume", callback_data=f"volume_{chat_id}"),
-            InlineKeyboardButton("❌ Close", callback_data=f"close_{chat_id}"),
+            InlineKeyboardButton("📋 Queue",   callback_data=f"queue_{chat_id}"),
+            InlineKeyboardButton("🔊 Volume",  callback_data=f"volume_{chat_id}"),
+            InlineKeyboardButton("❌ Close",   callback_data=f"close_{chat_id}"),
         ],
     ])
 
@@ -84,6 +85,7 @@ async def _send_now_playing(client: Client, message: Message, info: dict, is_vid
 
 async def _do_stream(client: Client, message: Message, info: dict, force: bool = False):
     chat_id = message.chat.id
+
     if db.is_active(chat_id) and not force:
         db.add_to_queue(chat_id, info)
         pos = len(db.get_queue(chat_id))
@@ -96,9 +98,6 @@ async def _do_stream(client: Client, message: Message, info: dict, force: bool =
 
     loading_msg = await message.reply_text("⬇️ Preparing stream, please wait...")
     try:
-        from pytgcalls.types.input_stream import AudioPiped
-        from KanhaMusic import call_py
-
         stream_url = await get_stream_url(info["url"])
         if not stream_url:
             await loading_msg.edit_text("❌ Could not fetch stream URL.")
@@ -106,9 +105,16 @@ async def _do_stream(client: Client, message: Message, info: dict, force: bool =
 
         db.add_active(chat_id, info)
         db.set_pause(chat_id, False)
-        await call_py.join_group_call(chat_id, AudioPiped(stream_url), stream_type=None)
+
+        ok = await stream_audio(chat_id, stream_url)
+        if not ok:
+            await loading_msg.edit_text("❌ Failed to join voice chat.")
+            db.remove_active(chat_id)
+            return
+
         await loading_msg.delete()
         await _send_now_playing(client, message, info)
+
     except Exception as e:
         await loading_msg.edit_text(f"❌ Stream error: {e}")
         db.remove_active(chat_id)
@@ -160,17 +166,19 @@ async def playforce_command(client: Client, message: Message):
     await msg.delete()
 
     chat_id = message.chat.id
-    try:
-        from pytgcalls.types.input_stream import AudioPiped
-        from KanhaMusic import call_py
-        stream_url = await get_stream_url(info["url"])
-        if stream_url:
-            await call_py.change_stream(chat_id, AudioPiped(stream_url))
-            db.add_active(chat_id, info)
-            db.set_pause(chat_id, False)
-            await _send_now_playing(client, message, info)
-    except Exception:
+    stream_url = await get_stream_url(info["url"])
+    if not stream_url:
+        await message.reply_text("❌ Could not fetch stream URL.")
+        return
+
+    ok = await change_audio(chat_id, stream_url)
+    if not ok:
         await _do_stream(client, message, info, force=True)
+        return
+
+    db.add_active(chat_id, info)
+    db.set_pause(chat_id, False)
+    await _send_now_playing(client, message, info)
 
 
 @Client.on_message(filters.command(["vplay", "vp"]) & filters.group)
@@ -190,20 +198,21 @@ async def vplay_command(client: Client, message: Message):
 
     await msg.edit_text("⬇️ Preparing video stream...")
     chat_id = message.chat.id
-    try:
-        from pytgcalls.types.input_stream import AudioVideoPiped
-        from KanhaMusic import call_py
-        stream_url = await get_stream_url(info["url"])
-        if not stream_url:
-            await msg.edit_text("❌ Could not fetch video stream.")
-            return
-        db.add_active(chat_id, info)
-        await call_py.join_group_call(chat_id, AudioVideoPiped(stream_url), stream_type=None)
-        await msg.delete()
-        await _send_now_playing(client, message, info, is_video=True)
-    except Exception as e:
-        await msg.edit_text(f"❌ Video stream error: {e}")
+
+    stream_url = await get_stream_url(info["url"])
+    if not stream_url:
+        await msg.edit_text("❌ Could not fetch video stream.")
+        return
+
+    db.add_active(chat_id, info)
+    ok = await stream_video(chat_id, stream_url)
+    if not ok:
+        await msg.edit_text("❌ Video stream error. Make sure assistant is in the group.")
         db.remove_active(chat_id)
+        return
+
+    await msg.delete()
+    await _send_now_playing(client, message, info, is_video=True)
 
 
 @Client.on_message(filters.command(["song", "jsong"]) & filters.group)
