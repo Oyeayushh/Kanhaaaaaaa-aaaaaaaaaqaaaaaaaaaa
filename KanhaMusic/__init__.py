@@ -1,16 +1,12 @@
 """
-KanhaMusic — Main bot initialization.
-Uses pytgcalls old API (AudioPiped).
+KanhaMusic — Main package init.
+Imports are served from KanhaMusic.core so plugins can do:
+    from KanhaMusic import app, assistant, call_py
 """
 
 import logging
 import os
 import sys
-
-from pyrogram import Client
-from pytgcalls import PyTgCalls
-
-from KanhaMusic.config import Config
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,21 +23,8 @@ os.makedirs("downloads", exist_ok=True)
 os.makedirs("cache/thumbs", exist_ok=True)
 os.makedirs("assets", exist_ok=True)
 
-app = Client(
-    name="KanhaMusic",
-    api_id=Config.API_ID,
-    api_hash=Config.API_HASH,
-    bot_token=Config.BOT_TOKEN,
-    plugins=dict(root="KanhaMusic/plugins"),
-    sleep_threshold=30,
-)
+from KanhaMusic.core.bot import app
+from KanhaMusic.core.userbot import assistant
+from KanhaMusic.core.call import call_py
 
-assistant = Client(
-    name="KanhaAssistant",
-    api_id=Config.API_ID,
-    api_hash=Config.API_HASH,
-    session_string=Config.STRING_SESSION,
-    sleep_threshold=30,
-)
-
-call_py = PyTgCalls(assistant)
+__all__ = ["app", "assistant", "call_py"]
