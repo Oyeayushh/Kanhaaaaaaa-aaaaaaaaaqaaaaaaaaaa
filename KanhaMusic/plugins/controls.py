@@ -1,19 +1,14 @@
 """
 Playback controls: pause, resume, skip, stop, mute, unmute, volume, loop, shuffle
-Uses pytgcalls old API.
 """
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
 
+from KanhaMusic.core.call import call_py
 from KanhaMusic.database import db
 from KanhaMusic.strings import get_string
-from KanhaMusic.utils.decorators import admin_or_auth, check_blacklist
-
-
-async def _call():
-    from KanhaMusic import call_py
-    return call_py
+from KanhaMusic.utils import get_stream_url, change_audio, admin_or_auth, check_blacklist
 
 
 @Client.on_message(filters.command(["pause"]) & filters.group)
@@ -26,7 +21,7 @@ async def pause_command(client: Client, message: Message):
     if db.is_paused(chat_id):
         return await message.reply_text(get_string["already_paused"])
     try:
-        await (await _call()).pause_stream(chat_id)
+        await call_py.pause_stream(chat_id)
         db.set_pause(chat_id, True)
         await message.reply_text(get_string["music_paused"])
     except Exception as e:
@@ -43,7 +38,7 @@ async def resume_command(client: Client, message: Message):
     if not db.is_paused(chat_id):
         return await message.reply_text(get_string["already_playing"])
     try:
-        await (await _call()).resume_stream(chat_id)
+        await call_py.resume_stream(chat_id)
         db.set_pause(chat_id, False)
         await message.reply_text(get_string["music_resumed"])
     except Exception as e:
@@ -60,9 +55,8 @@ async def skip_command(client: Client, message: Message):
 
     queue = db.get_queue(chat_id)
     if not queue:
-        call = await _call()
         try:
-            await call.leave_group_call(chat_id)
+            await call_py.leave_group_call(chat_id)
         except Exception:
             pass
         db.remove_active(chat_id)
@@ -72,21 +66,19 @@ async def skip_command(client: Client, message: Message):
     next_track = queue.pop(0)
     db.queues[chat_id] = queue
     try:
-        from pytgcalls.types.input_stream import AudioPiped
-        from KanhaMusic.utils import get_stream_url
-        call = await _call()
         stream_url = await get_stream_url(next_track["url"])
         if stream_url:
-            await call.change_stream(chat_id, AudioPiped(stream_url))
-            db.add_active(chat_id, next_track)
-            db.set_pause(chat_id, False)
-            await message.reply_text(
-                f"⏭ **Skipped!**\n\n"
-                f"🎵 **Now Playing:** {next_track.get('title', 'Unknown')[:50]}\n"
-                f"⏱ Duration: {next_track.get('duration', '0:00')}"
-            )
-        else:
-            await message.reply_text("❌ Could not load next track.")
+            ok = await change_audio(chat_id, stream_url)
+            if ok:
+                db.add_active(chat_id, next_track)
+                db.set_pause(chat_id, False)
+                await message.reply_text(
+                    f"⏭ **Skipped!**\n\n"
+                    f"🎵 **Now Playing:** {next_track.get('title', 'Unknown')[:50]}\n"
+                    f"⏱ Duration: {next_track.get('duration', '0:00')}"
+                )
+                return
+        await message.reply_text("❌ Could not load next track.")
     except Exception as e:
         await message.reply_text(f"❌ Skip error: {e}")
 
@@ -98,9 +90,8 @@ async def stop_command(client: Client, message: Message):
     chat_id = message.chat.id
     if not db.is_active(chat_id):
         return await message.reply_text(get_string["not_in_vc"])
-    call = await _call()
     try:
-        await call.leave_group_call(chat_id)
+        await call_py.leave_group_call(chat_id)
     except Exception:
         pass
     db.remove_active(chat_id)
@@ -115,7 +106,7 @@ async def stop_command(client: Client, message: Message):
 async def mute_command(client: Client, message: Message):
     chat_id = message.chat.id
     try:
-        await (await _call()).mute_stream(chat_id)
+        await call_py.mute_stream(chat_id)
         db.set_mute(chat_id, True)
         await message.reply_text("🔇 Assistant has been **muted**.")
     except Exception as e:
@@ -128,7 +119,7 @@ async def mute_command(client: Client, message: Message):
 async def unmute_command(client: Client, message: Message):
     chat_id = message.chat.id
     try:
-        await (await _call()).unmute_stream(chat_id)
+        await call_py.unmute_stream(chat_id)
         db.set_mute(chat_id, False)
         await message.reply_text("🔊 Assistant has been **unmuted**.")
     except Exception as e:
@@ -153,7 +144,7 @@ async def volume_command(client: Client, message: Message):
     except ValueError:
         return await message.reply_text("❌ Volume must be between **1 and 200**.")
     try:
-        await (await _call()).change_volume_call(chat_id, vol)
+        await call_py.change_volume_call(chat_id, vol)
     except Exception:
         pass
     db.set_volume(chat_id, vol)
@@ -193,13 +184,13 @@ async def shuffle_command(client: Client, message: Message):
     await message.reply_text(get_string["shuffled"])
 
 
-# ── Inline button callbacks ─────────────────────────────────────────────────
+# ── Inline button callbacks ──────────────────────────────────────────────────
 
 @Client.on_callback_query(filters.regex(r"^pause_(-?\d+)$"))
 async def cb_pause(client: Client, query: CallbackQuery):
     chat_id = int(query.matches[0].group(1))
     try:
-        await (await _call()).pause_stream(chat_id)
+        await call_py.pause_stream(chat_id)
         db.set_pause(chat_id, True)
     except Exception:
         pass
@@ -210,7 +201,7 @@ async def cb_pause(client: Client, query: CallbackQuery):
 async def cb_resume(client: Client, query: CallbackQuery):
     chat_id = int(query.matches[0].group(1))
     try:
-        await (await _call()).resume_stream(chat_id)
+        await call_py.resume_stream(chat_id)
         db.set_pause(chat_id, False)
     except Exception:
         pass
@@ -223,15 +214,13 @@ async def cb_skip(client: Client, query: CallbackQuery):
     queue = db.get_queue(chat_id)
     if queue:
         try:
-            from pytgcalls.types.input_stream import AudioPiped
-            from KanhaMusic.utils import get_stream_url
             next_track = queue.pop(0)
             db.queues[chat_id] = queue
-            call = await _call()
             stream_url = await get_stream_url(next_track["url"])
             if stream_url:
-                await call.change_stream(chat_id, AudioPiped(stream_url))
-                db.add_active(chat_id, next_track)
+                ok = await change_audio(chat_id, stream_url)
+                if ok:
+                    db.add_active(chat_id, next_track)
         except Exception:
             pass
     await query.answer("⏭ Skipped!", show_alert=False)
@@ -241,7 +230,7 @@ async def cb_skip(client: Client, query: CallbackQuery):
 async def cb_stop(client: Client, query: CallbackQuery):
     chat_id = int(query.matches[0].group(1))
     try:
-        await (await _call()).leave_group_call(chat_id)
+        await call_py.leave_group_call(chat_id)
     except Exception:
         pass
     db.remove_active(chat_id)
