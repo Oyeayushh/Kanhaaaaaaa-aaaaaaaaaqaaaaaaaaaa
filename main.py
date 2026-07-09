@@ -1,5 +1,6 @@
 """
 KanhaMusic — Entry point.
+Stream-end handler uses kanhaCall (core/call.py).
 """
 
 import asyncio
@@ -32,7 +33,7 @@ def check_config():
         print(
             f"{Fore.RED}❌ Missing required config values:{Style.RESET_ALL}\n"
             + "\n".join(f"  • {m}" for m in missing)
-            + f"\n\n{Fore.YELLOW}Please set them as environment variables.{Style.RESET_ALL}"
+            + f"\n\n{Fore.YELLOW}Please set them as environment variables / Replit Secrets.{Style.RESET_ALL}"
         )
         sys.exit(1)
 
@@ -40,34 +41,34 @@ def check_config():
 # ─── Stream-End Handler ───────────────────────────────────────────────────────
 # Priority chain when a song ends:
 #   1. Loop = 1  → replay same song
-#   2. Queue     → play next song
-#   3. Loop = 2  → re-add current to queue end, replay
+#   2. Queue     → play next queued song
+#   3. Loop = 2  → queue-loop (re-add finished song, play next)
 #   4. Autoplay  → fetch related song from YouTube
 #   5. Stop      → leave VC
 
 async def _handle_stream_end(chat_id: int):
     from KanhaMusic import app
-    from KanhaMusic.core.call import call_py
+    from KanhaMusic.core.call import kanhaCall
     from KanhaMusic.database import db
     from KanhaMusic.utils.youtube import get_stream_url
     from KanhaMusic.utils.thumbnails import get_thumb
-    from KanhaMusic.utils.stream.audio import change_audio
 
     current = db.get_active(chat_id)
     queue   = db.get_queue(chat_id)
     loop    = db.get_loop(chat_id)
 
-    async def _play_track(info: dict, label: str = "🎵"):
+    async def _play_track(info: dict, label: str = "🎵") -> bool:
+        """Get stream URL, change stream, send now-playing card."""
         stream_url = await get_stream_url(info["url"])
         if not stream_url:
-            logger.warning(f"[StreamEnd] No stream URL for: {info.get('title')}")
+            logger.warning(f"[StreamEnd] No URL for: {info.get('title')}")
             return False
+        ok = await kanhaCall.change_stream(chat_id, stream_url)
+        if not ok:
+            return False
+        db.add_active(chat_id, info)
+        db.set_pause(chat_id, False)
         try:
-            ok = await change_audio(chat_id, stream_url)
-            if not ok:
-                return False
-            db.add_active(chat_id, info)
-            db.set_pause(chat_id, False)
             thumb = await get_thumb(
                 song_title=info.get("title", "Unknown"),
                 artist=info.get("channel", "Unknown"),
@@ -86,16 +87,12 @@ async def _handle_stream_end(chat_id: int):
                 await app.send_photo(chat_id, thumb, caption=caption)
             else:
                 await app.send_message(chat_id, caption)
-            return True
         except Exception as e:
-            logger.error(f"[StreamEnd] Play error: {e}")
-            return False
+            logger.warning(f"[StreamEnd] Card send error: {e}")
+        return True
 
     async def _stop():
-        try:
-            await call_py.leave_group_call(chat_id)
-        except Exception:
-            pass
+        await kanhaCall.leave_call(chat_id)
         db.remove_active(chat_id)
         db.clear_queue(chat_id)
 
@@ -115,16 +112,16 @@ async def _handle_stream_end(chat_id: int):
         if await _play_track(next_track, "📋 **Queue**"):
             return
 
-    # 3. Queue-loop restart
+    # 3. Queue-loop restart (queue was empty, re-add last song)
     if loop == 2 and current and not queue:
         logger.info("[StreamEnd] Queue-loop restart")
         if await _play_track(current, "🔁 **Queue Loop**"):
             return
 
-    # 4. Autoplay
+    # 4. Autoplay — find related song
     from KanhaMusic.plugins.autoplay import is_autoplay_on
     if is_autoplay_on(chat_id) and current:
-        logger.info(f"[StreamEnd] Autoplay searching for: {current.get('title')}")
+        logger.info(f"[StreamEnd] Autoplay → searching for: {current.get('title')}")
         try:
             from KanhaMusic.utils.autoplay import get_related_track
             related = await get_related_track(
@@ -146,7 +143,7 @@ async def _handle_stream_end(chat_id: int):
 
 async def start_bot():
     from KanhaMusic import app, assistant
-    from KanhaMusic.core.call import call_py
+    from KanhaMusic.core.call import call_py, kanhaCall
     from KanhaMusic.config import Config
     from KanhaMusic.utils.thumbnails import ensure_brand_thumb
     from pytgcalls import PyTgCalls
@@ -156,6 +153,7 @@ async def start_bot():
 
     await ensure_brand_thumb()
 
+    # Register stream-end event on the raw PyTgCalls instance
     @call_py.on_stream_end()
     async def stream_end_handler(client: PyTgCalls, update):
         try:
@@ -168,20 +166,23 @@ async def start_bot():
     me_assistant = await assistant.get_me()
     logger.info(f"Assistant ready: @{me_assistant.username}")
 
-    logger.info("Starting PyTgCalls...")
+    logger.info("Starting PyTgCalls (call engine)...")
     await call_py.start()
 
-    logger.info("Starting bot...")
+    logger.info("Starting main bot...")
     await app.start()
     me = await app.get_me()
 
     print(
-        f"\n{Fore.GREEN}✅ KanhaMusic is LIVE!{Style.RESET_ALL}\n"
-        f"{Fore.CYAN}🤖 Bot:{Style.RESET_ALL}       @{me.username}\n"
-        f"{Fore.CYAN}🎙 Assistant:{Style.RESET_ALL}  @{me_assistant.username}\n"
-        f"{Fore.CYAN}👑 Owner ID:{Style.RESET_ALL}   {Config.OWNER_ID}\n"
-        f"{Fore.CYAN}🔄 Autoplay:{Style.RESET_ALL}   Enabled (per-group toggle)\n"
-        f"{Fore.CYAN}📞 call.py:{Style.RESET_ALL}    KanhaMusic/core/call.py\n"
+        f"\n{Fore.GREEN}✅  KanhaMusic is LIVE!{Style.RESET_ALL}\n"
+        f"\n"
+        f"{Fore.CYAN}  🤖  Bot:{Style.RESET_ALL}       @{me.username}\n"
+        f"{Fore.CYAN}  🎙  Assistant:{Style.RESET_ALL}  @{me_assistant.username}\n"
+        f"{Fore.CYAN}  👑  Owner ID:{Style.RESET_ALL}   {Config.OWNER_ID}\n"
+        f"\n"
+        f"{Fore.YELLOW}  📞  call.py  →  KanhaMusic/core/call.py{Style.RESET_ALL}\n"
+        f"{Fore.YELLOW}  🔧  kanhaCall → join | leave | change | pause | volume{Style.RESET_ALL}\n"
+        f"{Fore.YELLOW}  🔄  Autoplay → per-group smart autoplay{Style.RESET_ALL}\n"
     )
 
     if Config.LOG_GROUP_ID:
@@ -191,11 +192,11 @@ async def start_bot():
                 f"✅ **KanhaMusic Started!**\n\n"
                 f"🤖 **Bot:** @{me.username}\n"
                 f"🎙 **Assistant:** @{me_assistant.username}\n"
-                f"📞 **Core:** `KanhaMusic/core/call.py`\n"
+                f"📞 **Engine:** `KanhaMusic/core/call.py` → `kanhaCall`\n"
                 f"⚡ All systems operational!"
             )
         except Exception as e:
-            logger.warning(f"Could not send log: {e}")
+            logger.warning(f"Log message failed: {e}")
 
     await asyncio.Event().wait()
 
