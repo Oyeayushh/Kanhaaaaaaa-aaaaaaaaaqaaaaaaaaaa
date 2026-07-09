@@ -1,11 +1,12 @@
 """
 Playback controls: pause, resume, skip, stop, mute, unmute, volume, loop, shuffle
+Uses kanhaCall (core/call.py) for all VC operations.
 """
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery
 
-from KanhaMusic.core.call import call_py
+from KanhaMusic.core.call import kanhaCall
 from KanhaMusic.database import db
 from KanhaMusic.strings import get_string
 from KanhaMusic.utils import get_stream_url, change_audio, admin_or_auth, check_blacklist
@@ -20,12 +21,12 @@ async def pause_command(client: Client, message: Message):
         return await message.reply_text(get_string["not_in_vc"])
     if db.is_paused(chat_id):
         return await message.reply_text(get_string["already_paused"])
-    try:
-        await call_py.pause_stream(chat_id)
+    ok = await kanhaCall.pause_call(chat_id)
+    if ok:
         db.set_pause(chat_id, True)
         await message.reply_text(get_string["music_paused"])
-    except Exception as e:
-        await message.reply_text(f"❌ {e}")
+    else:
+        await message.reply_text("❌ Could not pause. Try again.")
 
 
 @Client.on_message(filters.command(["resume"]) & filters.group)
@@ -37,12 +38,12 @@ async def resume_command(client: Client, message: Message):
         return await message.reply_text(get_string["not_in_vc"])
     if not db.is_paused(chat_id):
         return await message.reply_text(get_string["already_playing"])
-    try:
-        await call_py.resume_stream(chat_id)
+    ok = await kanhaCall.resume_call(chat_id)
+    if ok:
         db.set_pause(chat_id, False)
         await message.reply_text(get_string["music_resumed"])
-    except Exception as e:
-        await message.reply_text(f"❌ {e}")
+    else:
+        await message.reply_text("❌ Could not resume. Try again.")
 
 
 @Client.on_message(filters.command(["skip", "s"]) & filters.group)
@@ -55,32 +56,28 @@ async def skip_command(client: Client, message: Message):
 
     queue = db.get_queue(chat_id)
     if not queue:
-        try:
-            await call_py.leave_group_call(chat_id)
-        except Exception:
-            pass
+        await kanhaCall.leave_call(chat_id)
         db.remove_active(chat_id)
         db.clear_queue(chat_id)
-        return await message.reply_text("⏹ No more songs in queue. Stopped.")
+        return await message.reply_text("⏹ No more songs in queue. Left voice chat.")
 
     next_track = queue.pop(0)
     db.queues[chat_id] = queue
-    try:
-        stream_url = await get_stream_url(next_track["url"])
-        if stream_url:
-            ok = await change_audio(chat_id, stream_url)
-            if ok:
-                db.add_active(chat_id, next_track)
-                db.set_pause(chat_id, False)
-                await message.reply_text(
-                    f"⏭ **Skipped!**\n\n"
-                    f"🎵 **Now Playing:** {next_track.get('title', 'Unknown')[:50]}\n"
-                    f"⏱ Duration: {next_track.get('duration', '0:00')}"
-                )
-                return
-        await message.reply_text("❌ Could not load next track.")
-    except Exception as e:
-        await message.reply_text(f"❌ Skip error: {e}")
+    stream_url = await get_stream_url(next_track["url"])
+    if not stream_url:
+        return await message.reply_text("❌ Could not fetch stream URL for next track.")
+
+    ok = await kanhaCall.change_stream(chat_id, stream_url)
+    if ok:
+        db.add_active(chat_id, next_track)
+        db.set_pause(chat_id, False)
+        await message.reply_text(
+            f"⏭ **Skipped!**\n\n"
+            f"🎵 **Now Playing:** {next_track.get('title', 'Unknown')[:50]}\n"
+            f"⏱ Duration: {next_track.get('duration', '0:00')}"
+        )
+    else:
+        await message.reply_text("❌ Skip error. Try again.")
 
 
 @Client.on_message(filters.command(["stop", "end"]) & filters.group)
@@ -90,10 +87,7 @@ async def stop_command(client: Client, message: Message):
     chat_id = message.chat.id
     if not db.is_active(chat_id):
         return await message.reply_text(get_string["not_in_vc"])
-    try:
-        await call_py.leave_group_call(chat_id)
-    except Exception:
-        pass
+    await kanhaCall.leave_call(chat_id)
     db.remove_active(chat_id)
     db.clear_queue(chat_id)
     db.set_pause(chat_id, False)
@@ -105,12 +99,12 @@ async def stop_command(client: Client, message: Message):
 @admin_or_auth
 async def mute_command(client: Client, message: Message):
     chat_id = message.chat.id
-    try:
-        await call_py.mute_stream(chat_id)
+    ok = await kanhaCall.mute_call(chat_id)
+    if ok:
         db.set_mute(chat_id, True)
         await message.reply_text("🔇 Assistant has been **muted**.")
-    except Exception as e:
-        await message.reply_text(f"❌ {e}")
+    else:
+        await message.reply_text("❌ Could not mute. Is assistant in VC?")
 
 
 @Client.on_message(filters.command(["unmute"]) & filters.group)
@@ -118,12 +112,12 @@ async def mute_command(client: Client, message: Message):
 @admin_or_auth
 async def unmute_command(client: Client, message: Message):
     chat_id = message.chat.id
-    try:
-        await call_py.unmute_stream(chat_id)
+    ok = await kanhaCall.unmute_call(chat_id)
+    if ok:
         db.set_mute(chat_id, False)
         await message.reply_text("🔊 Assistant has been **unmuted**.")
-    except Exception as e:
-        await message.reply_text(f"❌ {e}")
+    else:
+        await message.reply_text("❌ Could not unmute. Is assistant in VC?")
 
 
 @Client.on_message(filters.command(["volume", "vol", "v"]) & filters.group)
@@ -143,10 +137,8 @@ async def volume_command(client: Client, message: Message):
             raise ValueError
     except ValueError:
         return await message.reply_text("❌ Volume must be between **1 and 200**.")
-    try:
-        await call_py.change_volume_call(chat_id, vol)
-    except Exception:
-        pass
+
+    await kanhaCall.volume_call(chat_id, vol)
     db.set_volume(chat_id, vol)
     await message.reply_text(get_string["volume_changed"].format(vol))
 
@@ -189,23 +181,19 @@ async def shuffle_command(client: Client, message: Message):
 @Client.on_callback_query(filters.regex(r"^pause_(-?\d+)$"))
 async def cb_pause(client: Client, query: CallbackQuery):
     chat_id = int(query.matches[0].group(1))
-    try:
-        await call_py.pause_stream(chat_id)
+    ok = await kanhaCall.pause_call(chat_id)
+    if ok:
         db.set_pause(chat_id, True)
-    except Exception:
-        pass
-    await query.answer("⏸ Paused!", show_alert=False)
+    await query.answer("⏸ Paused!" if ok else "❌ Error", show_alert=False)
 
 
 @Client.on_callback_query(filters.regex(r"^resume_(-?\d+)$"))
 async def cb_resume(client: Client, query: CallbackQuery):
     chat_id = int(query.matches[0].group(1))
-    try:
-        await call_py.resume_stream(chat_id)
+    ok = await kanhaCall.resume_call(chat_id)
+    if ok:
         db.set_pause(chat_id, False)
-    except Exception:
-        pass
-    await query.answer("▶️ Resumed!", show_alert=False)
+    await query.answer("▶️ Resumed!" if ok else "❌ Error", show_alert=False)
 
 
 @Client.on_callback_query(filters.regex(r"^skip_(-?\d+)$"))
@@ -218,9 +206,10 @@ async def cb_skip(client: Client, query: CallbackQuery):
             db.queues[chat_id] = queue
             stream_url = await get_stream_url(next_track["url"])
             if stream_url:
-                ok = await change_audio(chat_id, stream_url)
+                ok = await kanhaCall.change_stream(chat_id, stream_url)
                 if ok:
                     db.add_active(chat_id, next_track)
+                    db.set_pause(chat_id, False)
         except Exception:
             pass
     await query.answer("⏭ Skipped!", show_alert=False)
@@ -229,10 +218,7 @@ async def cb_skip(client: Client, query: CallbackQuery):
 @Client.on_callback_query(filters.regex(r"^stop_(-?\d+)$"))
 async def cb_stop(client: Client, query: CallbackQuery):
     chat_id = int(query.matches[0].group(1))
-    try:
-        await call_py.leave_group_call(chat_id)
-    except Exception:
-        pass
+    await kanhaCall.leave_call(chat_id)
     db.remove_active(chat_id)
     db.clear_queue(chat_id)
     await query.answer("⏹ Stopped!", show_alert=False)
