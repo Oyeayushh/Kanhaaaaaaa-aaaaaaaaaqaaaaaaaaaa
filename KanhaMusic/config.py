@@ -35,7 +35,7 @@ class Config:
         "https://h.uguu.se/PEdxUfYu.jpg"
     )
 
-    UPSTREAM_REPO = getenv("UPSTREAM_REPO", "https://github.com/KanhaMusic/KanhaMusic")
+    UPSTREAM_REPO = getenv("UPSTREAM_REPO", "https://github.com/Oyeayushh/Kanhaaaaaaa-aaaaaaaaaqaaaaaaaaaa")
     UPSTREAM_BRANCH = getenv("UPSTREAM_BRANCH", "main")
 
     AUTO_LEAVING_ASSISTANT = bool(getenv("AUTO_LEAVING_ASSISTANT", True))
